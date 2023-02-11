@@ -1,32 +1,82 @@
-import { compileToConstructor } from './deps.ts';
+import { Sets, compileToConstructor } from './deps.ts';
+import specification from './ruleflow-rsp.js'; 
+
+// terminology:
+// data: tuple or fact
+// fact: ground atom, so a predicate with list of values (from the 'relational' domain)
+// tuple: list of values (from the 'data' domain)
 
 export {registerFlow, instantiateFlow };
 
-const AsyncGeneratorFunction = async function* () {}.constructor;
+async function* IntervalSource(low, high, outPort)
+{
+  yield; 
+  for (let n = low; n <= high; n++)
+  {
+    yield [[outPort, n]];
+  }
+}
 
-const specification = `
+// in: name not important, so not a param
+async function* MapOperator(f, outPort)
+{
+  let input = yield; 
+  while (true) 
+  {
+    input = yield input.map(([_in, n]) => [outPort, f(n)]);
+  }
+}
 
-; terminology:
-; data: tuple or fact
-; fact: ground atom, so a predicate with list of values (from the 'relational' domain)
-; tuple: list of values (from the 'data' domain)
+// in: add, remove; out: added, removed
+async function* RulesOperator(src)
+{
+  const ctr = compileToConstructor(src);
+  const instance = ctr();
+  let input = yield;
+  do
+  {
+    const add = new Map();
+    const remove = new Map();
+    for (const [inPort, fact] of input)
+    {
+      const factCtr = instance[fact[0]];
+      const instanceFact = new factCtr(...fact.slice(1));
+      if (inPort === 'add')
+      {
+        add.set(factCtr, add.has(factCtr) ? add.get(factCtr).push(instanceFact) : [instanceFact]);
+      }
+      else if (inPort === 'remove')
+      {
+        remove.set(factCtr, remove.has(factCtr) ? remove.get(factCtr).push(instanceFact) : [instanceFact]);
+      }
+      else
+      {
+        throw new Error(`cannot handle input port ${inPort}`);
+      }
+    }
+    const delta = instance.computeDelta(add, remove);
+    const allAdded = [...delta.added().values()].flat();
+    const allAdd = [...add.values()].flat().map(t => instance.getTuple(t));
+    const addedNoAdd = [...Sets.difference(allAdded, allAdd)].map(f => ['added', [f.name(), ...f.values()]]);;
+    const allRemoved = [...delta.removed().values()].flat();
+    const allRemove = [...remove.values()].flat();
+    const removedNoRemove = [...Sets.difference(allRemoved, allRemove)].map(f => ['removed', [f.name(), ...f.values()]]);;
+    input = yield removedNoRemove.concat(addedNoAdd);
+  }
+  while (true);      
+}
 
-(relation [rator name lambda]) ; numbered ports, data in/out
-(relation [ref name ref]) ; composition
-
-(relation [rand operator port]) ; in_port
-(relation [ret operator port]) ; out_port
-
-(relation [link from out_port to in_port])
-
-(rule [map name in_port f out_port] [rator name ])
-
-;(rule [connected_input to in_port] [link _ _ to in_port])
-;(rule [connected_output from out_port] [link from out_port _ _])
-;(rule [open_input operator in_port] [rand operator in_port] (not [connected_input operator in_port]))
-;(rule [open_output operator out_port] [ret operator out_port] (not [connected_output operator out_port]))
-
-`;
+// name inPort not important
+async function* ConsoleSink(name)
+{
+  while (true)
+  {
+    for (const [_in, n] of yield)
+    {
+      console.log(`${name}: ${n}`);
+    }
+  }
+}
 
 // copied from rulespace/analyzer.js
 function topoSort(operators)
@@ -89,14 +139,14 @@ function topoSort(operators)
 class FlowOperator
 {
   name;
-  lam;
+  asyncGenFun;
   inPorts;
   outPorts;
 
-  constructor(name, lam, inPorts, outPorts)
+  constructor(name, asyncGenFun, inPorts, outPorts)
   {
     this.name = name;
-    this.lam = lam;
+    this.asyncGenFun = asyncGenFun;
     this.inPorts = inPorts;
     this.outPorts = outPorts;
   }
@@ -301,7 +351,7 @@ class Flow
         {
           if (operator instanceof FlowOperator)
           {
-            const ag = new AsyncGeneratorFunction(operator.lam)();
+            const ag = operator.asyncGenFun();
             return ag;
           }
           throw new Error(`cannot handle operator ${operator}`);
@@ -428,52 +478,61 @@ function compileFlow(program)
   const ctr = compileToConstructor(specification + program);
   const instance = ctr();
   
-  for (const t of instance.tuples().filter(t => t.name() === 'rator'))
+  for (const t of instance.tuples().filter(t => t.name() === 'interval'))
   {
-    operators.set(t.t0, new FlowOperator(t.t0, t.t1, [], []));
+    const [name, low, high, outPort] = t.values();
+    operators.set(name, new FlowOperator(name, () => IntervalSource(low, high, outPort), [], [outPort]));
+  }
+
+  for (const t of instance.tuples().filter(t => t.name() === 'map'))
+  {
+    const [name, inPort, f, outPort] = t.values();
+    const fCtr = new Function(`return ${f}`);
+    operators.set(name, new FlowOperator(name, () => MapOperator(fCtr(), outPort), [inPort], [outPort]));
+  }
+
+  for (const t of instance.tuples().filter(t => t.name() === 'rules'))
+  {
+    const [name, src] = t.values();
+    operators.set(name, new FlowOperator(name, () => RulesOperator(src), ['add', 'remove'], ['added', 'removed']));
+  }
+
+  for (const t of instance.tuples().filter(t => t.name() === 'console'))
+  {
+    const [name, inPort] = t.values();
+    operators.set(name, new FlowOperator(name, () => ConsoleSink(name), [inPort], []));
+  }
+
+  for (const t of instance.tuples().filter(t => t.name() === 'javascript'))
+  {
+    const AsyncGeneratorFunction = async function* () {}.constructor;
+    const [name, src, inPort, outPort] = t.values();
+    operators.set(name, new FlowOperator(name, new AsyncGeneratorFunction(src), [inPort], [outPort]));
   }
 
   for (const t of instance.tuples().filter(t => t.name() === 'ref'))
   {
-    operators.set(t.t0, new RefOperator(t.t0, t.t1, [], []));
+    const [name, ref] = t.values();
+    operators.set(name, new RefOperator(name, ref, [], []));
   }
 
   for (const t of instance.tuples().filter(t => t.name() === 'rand'))
   {
-    const operator = operators.get(t.t0);
-    operator.inPorts.push(t.t1);
+    const [operator, inPort] = t.values();
+    operators.get(operator).inPorts.push(inPort);
   }
 
   for (const t of instance.tuples().filter(t => t.name() === 'ret'))
   {
-    const operator = operators.get(t.t0);
-    operator.outPorts.push(t.t1);
+    const [operator, outPort] = t.values();
+    operators.get(operator).outPorts.push(outPort);
   }
 
   for (const t of instance.tuples().filter(t => t.name() === 'link'))
   {
-    // const from = operators.get(t.t0);
-    // const outPort = t.t1;
-    // const to = operators.get(t.t2);
-    // const inPort = t.t3;
-    links.push([[t.t0, t.t1], [t.t2, t.t3]]);
+    const [from, outPort, to, inPort] = t.values();
+    links.push([[from, outPort], [to, inPort]]);
   }
-
-  // for (const t of instance.tuples().filter(t => t.name() === 'open_input'))
-  // {
-  //   const to = operators.get(t.t0);
-  //   const inPort = t.t1;
-  //   openInputs.push([to, inPort]);
-  //   console.log(`open input ${to} '${inPort}'`);
-  // }
-
-  // for (const t of instance.tuples().filter(t => t.name() === 'open_output'))
-  // {
-  //   const from = operators.get(t.t0);
-  //   const outPort = t.t1;
-  //   openOutputs.push([from, outPort]);
-  //   console.log(`open output ${from} '${outPort}'`);
-  // }
 
   // compute precedence relation 
   for (const operator of operators.values())
