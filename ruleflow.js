@@ -27,6 +27,16 @@ async function* MapOperator(f, outPort)
   }
 }
 
+async function* FilterOperator(f, outPort)
+{
+  let input = yield; 
+  while (true) 
+  {
+    const output = input.flatMap(([_in, n]) => f(n) ? [[outPort, n]] : []); 
+    input = yield output.length === 0 ? undefined : output;
+  }
+}
+
 // in: add, remove; out: added, removed
 async function* RulesOperator(src)
 {
@@ -354,7 +364,7 @@ class Flow
             const ag = operator.asyncGenFun();
             return ag;
           }
-          throw new Error(`cannot handle operator ${operator}`);
+          throw new Error(`cannot instantiate operator ${operator}`);
         });
       return ags;
     }
@@ -412,13 +422,13 @@ class Flow
           propagate();
           return;
         }
-        console.log(`operator ${i}: input ${inputValues[i]?.join(" ")}`);
+        // console.log(`operator ${i}: input ${inputValues[i]?.join(" ")}`);
         const ag = generators[i];
         const p = ag.next(inputValues[i]);
         p.then(result =>
           {
             const {value:yieldedValue, done} = result;
-            console.log(`operator ${i}: output ${yieldedValue?.join(" ")} (${done ? "done" : "not done"})}`);
+            // console.log(`operator ${i}: output ${yieldedValue?.join(" ")} (${done ? "done" : "not done"})}`);
             if (done)
             {
               terminate(i);
@@ -427,18 +437,22 @@ class Flow
             {
               if (yieldedValue !== undefined)
               {
-                outer: for (const [outPort, outputValue] of yieldedValue)
+                for (const [outPort, outputValue] of yieldedValue)
                 {
-                for (const [outP, to, inPort] of outputs[i])
+                  let deliveries = 0;
+                  for (const [outP, to, inPort] of outputs[i])
                   {
                     if (outP === outPort)
                     {
                       console.log(`${i}/${outPort} => ${to}/${inPort}: ${outputValue}`);
                       inputValues[to].push([inPort, outputValue]);    
-                      continue outer;
+                      deliveries++;
                     }
                   }
-                  throw new Error(`cannot deliver value from operator ${i} on output port '${outPort}' (unknown destination)`)
+                  if (deliveries === 0)
+                  {
+                    throw new Error(`cannot deliver value from operator ${i} on output port '${outPort}' (no known destinations)`)
+                  }
                 }  
               }
               loop(i+1);
@@ -489,6 +503,13 @@ function compileFlow(program)
     const [name, inPort, f, outPort] = t.values();
     const fCtr = new Function(`return ${f}`);
     operators.set(name, new FlowOperator(name, () => MapOperator(fCtr(), outPort), [inPort], [outPort]));
+  }
+
+  for (const t of instance.tuples().filter(t => t.name() === 'filter'))
+  {
+    const [name, inPort, f, outPort] = t.values();
+    const fCtr = new Function(`return ${f}`);
+    operators.set(name, new FlowOperator(name, () => FilterOperator(fCtr(), outPort), [inPort], [outPort]));
   }
 
   for (const t of instance.tuples().filter(t => t.name() === 'rules'))

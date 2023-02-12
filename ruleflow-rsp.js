@@ -15,6 +15,7 @@ export default
 
 ;; operators
 (relation [map name in_port f out_port])
+(relation [filter name in_port f out_port])
 (relation [rules name src])
 
 ;; sinks
