@@ -1,14 +1,17 @@
 import { registerFlow, instantiateFlow } from '../ruleflow.js';
 
-const doubleFlow = `
-[map 0 "in" "n => n*2" "out"]
+const nestedFlow = `
+[filter "f" "in" "n => n%2 === 0" "out"] 
+[map "m" "in" "n => n*2" "out"]
+
+[link "f" "out" "m" "in"]
 `;
 
-registerFlow('double', doubleFlow);
+registerFlow('nested', nestedFlow);
 
 const flow = `
 [interval 1 1 4 "out"]
-[ref 2 "double"]
+[ref 2 "nested"]
 [console 3 "in"]
 
 [link 1 "out" 2 "in"]

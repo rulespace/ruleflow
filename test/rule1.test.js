@@ -3,7 +3,7 @@ import { registerFlow, instantiateFlow } from '../ruleflow.js';
 const flow = `
 [interval 1 1 4 "out"]
 [map 2 "in" "n => ['Input', n]" "out"]
-[rules 3 "(rule [Doubled (* n 2)] [Input n])" ]
+[rules 3 "(rule [Doubled (* n 2)] [Input n])"]
 [map 4 "in" "([_, n]) => n" "out"]
 [console 5 "in"]
 

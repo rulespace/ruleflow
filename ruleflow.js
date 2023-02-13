@@ -166,6 +166,10 @@ class FlowOperator
     return `[rator '${this.name}']`;
   }
 
+  clone()
+  {
+    return new FlowOperator(this.name, this.asyncGenFun, this.inPorts.slice(0), this.outPorts.slice(0));
+  }
 }
 
 class RefOperator
@@ -186,6 +190,11 @@ class RefOperator
   toString()
   {
     return `[ref '${this.name}']`;
+  }
+
+  clone()
+  {
+    return new RefOperator(this.name, this.ref, this.inPorts.slice(0), this.outPorts.slice(0));
   }
 }
 
@@ -223,6 +232,17 @@ class Flow
         }
       }
     }
+  }
+
+  clone()
+  {
+    const operators = this.#toporators;
+    const newOperators = operators.map(operator => operator.clone());
+    const newLinks = this.#links.map(([[from, outP], [to, inP]]) =>
+    {
+      return [[newOperators[operators.indexOf(from)], outP], [newOperators[operators.indexOf(to)], inP]];
+    });
+    return new Flow(newOperators, newLinks);
   }
 
   operators()
@@ -283,7 +303,7 @@ class Flow
 
     function expandRefOperator(operator)
     {
-      const nestedFlow = flows.get(operator.ref);
+      const nestedFlow = flows.get(operator.ref).clone();
       if (nestedFlow === undefined)
       {
         throw new Error(`reference to undefined flow ${operator.ref}`);
@@ -335,6 +355,13 @@ class Flow
         }  
       });
 
+    for (const expandedFlow of ref2expandedFlow.values())
+    {
+      for (const link of expandedFlow.#links)
+      {
+        newLinks.push(link);
+      }
+    }
     return new Flow(newOperators, newLinks);
   }
 
@@ -461,11 +488,11 @@ class Flow
     const propagate = () =>
     {
       console.log(`\npropagation ${++propagationCounter}`)
-      // if (++propagationCounter > 1000)
-      // {
-      //   console.log("debugging: bailing...");
-      //   return;
-      // }
+      if (++propagationCounter > 100)
+      {
+        console.log("debugging: bailing...");
+        return;
+      }
       const inputValues = generators.map(_ => []);
 
       const loop = async (i, active) =>
