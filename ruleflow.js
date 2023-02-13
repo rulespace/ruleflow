@@ -338,7 +338,7 @@ class Flow
     return new Flow(newOperators, newLinks);
   }
 
-  instantiate() // only expanded flows (so no refs)
+  async instantiate() // only expanded flows (so no refs)
   {
     const operators = this.#toporators;
     const links = this.#links;
@@ -369,13 +369,20 @@ class Flow
       return ags;
     }
 
-    const generators = generateGenerators(operators);
-    // init step: move to first yield
-    generators.forEach(generator => generator.next());
-
-    //
+    const generators = generateGenerators(operators);    //
     const statusDone = generators.map(_ => false);
-
+    // init step: move to first yield
+    const initResult = await Promise.all(generators.map(generator => generator.next()));
+    initResult.forEach(({value:_, done}, i) => 
+      {
+        if (done)
+        {
+          // it's really "bad form" when a flow operator cannot complete it's init
+          // so maybe this should be an error instead?
+          terminate(i);
+        }
+      });
+    
     function terminate(i)
     {
       console.log(`terminating ${i}`);
@@ -383,25 +390,71 @@ class Flow
       {
         throw new Error('internal error: resumed a generator that was done');
       }
-      statusDone[i] === true;
+      statusDone[i] = true;
+      // check predecessors: if all outputs of predecessor are done, then transitively terminate
+      for (const [_inPort, from, _outPort] of inputs[i])
+      {
+        checkTerminationUpstream(from);
+      }
       // check successors: if all inputs of successor are done, then transitively terminate
       for (const [_outPort, to, _inPort] of outputs[i])
       {
-        checkTermination(to);
+        checkTerminationDownstream(to);
       }
     }
 
-    function checkTermination(i)
+    function terminateDownstream(i)
     {
-      let inputAlive = false;
+      console.log(`terminating (downstream) ${i}`);
+      if (statusDone[i] === true)
+      {
+        throw new Error('internal error: resumed a generator that was done');
+      }
+      statusDone[i] = true;
+      // check successors: if all inputs of successor are done, then transitively terminate
+      for (const [_outPort, to, _inPort] of outputs[i])
+      {
+        checkTerminationDownstream(to);
+      }
+    }
+
+    function terminateUpstream(i)
+    {
+      console.log(`terminating (upstream) ${i}`);
+      if (statusDone[i] === true)
+      {
+        throw new Error('internal error: resumed a generator that was done');
+      }
+      statusDone[i] = true;
+      // check predecessors: if all outputs of predecessor are done, then transitively terminate
       for (const [_inPort, from, _outPort] of inputs[i])
       {
-        inputAlive &= !statusDone[from]; // TODO break when alive
+        checkTerminationUpstream(from);
       }
-      if (!inputAlive)
+    }
+  
+    function checkTerminationDownstream(i)
+    {
+      for (const [_inPort, from, _outPort] of inputs[i])
       {
-        terminate(i);
+        if (!statusDone[from])
+        {
+          return;
+        }
       }
+      terminateDownstream(i);
+    }
+
+    function checkTerminationUpstream(i)
+    {
+      for (const [_outPort, to, _inPort] of outputs[i])
+      {
+        if (!statusDone[to])
+        {
+          return;
+        }
+      }
+      terminateUpstream(i);
     }
 
     let propagationCounter = 0;
@@ -415,51 +468,61 @@ class Flow
       // }
       const inputValues = generators.map(_ => []);
 
-      const loop = i =>
+      const loop = async (i, active) =>
       {
+        // console.log(`loop ${i} active ${active}`);
+        while (i < generators.length && statusDone[i])
+        {
+          i++;
+        }
         if (i === generators.length)
         {
-          propagate();
-          return;
+          if (active)
+          {
+            propagate();
+            return;  
+          }
+          else
+          {
+            console.log("propagation finished");
+            return;
+          }
         }
         // console.log(`operator ${i}: input ${inputValues[i]?.join(" ")}`);
         const ag = generators[i];
-        const p = ag.next(inputValues[i]);
-        p.then(result =>
+        const {value:yieldedValue, done} = await ag.next(inputValues[i]);
+        // console.log(`operator ${i}: output ${yieldedValue?.join(" ")} (${done ? "done" : "not done"})}`);
+        if (done)
+        {
+          terminate(i);
+          loop(i+1, active);
+        }
+        else
+        {
+          if (yieldedValue !== undefined)
           {
-            const {value:yieldedValue, done} = result;
-            // console.log(`operator ${i}: output ${yieldedValue?.join(" ")} (${done ? "done" : "not done"})}`);
-            if (done)
+            for (const [outPort, outputValue] of yieldedValue)
             {
-              terminate(i);
-            }
-            else
-            {
-              if (yieldedValue !== undefined)
+              let deliveries = 0;
+              for (const [outP, to, inPort] of outputs[i])
               {
-                for (const [outPort, outputValue] of yieldedValue)
+                if (outP === outPort)
                 {
-                  let deliveries = 0;
-                  for (const [outP, to, inPort] of outputs[i])
-                  {
-                    if (outP === outPort)
-                    {
-                      console.log(`${i}/${outPort} => ${to}/${inPort}: ${outputValue}`);
-                      inputValues[to].push([inPort, outputValue]);    
-                      deliveries++;
-                    }
-                  }
-                  if (deliveries === 0)
-                  {
-                    throw new Error(`cannot deliver value from operator ${i} on output port '${outPort}' (no known destinations)`)
-                  }
-                }  
+                  console.log(`${i}/${outPort} => ${to}/${inPort}: ${outputValue}`);
+                  inputValues[to].push([inPort, outputValue]);    
+                  deliveries++;
+                }
               }
-              loop(i+1);
-            }
-          });
+              if (deliveries === 0)
+              {
+                throw new Error(`cannot deliver value from operator ${i} on output port '${outPort}' (no known destinations)`)
+              }
+            }  
+          }
+          loop(i+1, true);
+        }
       }
-      loop(0);
+     loop(0, false);
     }
     propagate();
   }
@@ -527,8 +590,8 @@ function compileFlow(program)
   for (const t of instance.tuples().filter(t => t.name() === 'javascript'))
   {
     const AsyncGeneratorFunction = async function* () {}.constructor;
-    const [name, src, inPort, outPort] = t.values();
-    operators.set(name, new FlowOperator(name, new AsyncGeneratorFunction(src), [inPort], [outPort]));
+    const [name, src] = t.values();
+    operators.set(name, new FlowOperator(name, new AsyncGeneratorFunction(src), [], []));
   }
 
   for (const t of instance.tuples().filter(t => t.name() === 'ref'))
@@ -539,14 +602,14 @@ function compileFlow(program)
 
   for (const t of instance.tuples().filter(t => t.name() === 'rand'))
   {
-    const [operator, inPort] = t.values();
-    operators.get(operator).inPorts.push(inPort);
+    const [name, inPort] = t.values();
+    operators.get(name).inPorts.push(inPort);
   }
 
   for (const t of instance.tuples().filter(t => t.name() === 'ret'))
   {
-    const [operator, outPort] = t.values();
-    operators.get(operator).outPorts.push(outPort);
+    const [name, outPort] = t.values();
+    operators.get(name).outPorts.push(outPort);
   }
 
   for (const t of instance.tuples().filter(t => t.name() === 'link'))

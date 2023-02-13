@@ -2,7 +2,7 @@ import { registerFlow, instantiateFlow } from '../ruleflow.js';
 
 const flow = `
 [interval 1 1 4 "out"]
-[interval 2 5 8 "out"]
+[interval 2 5 12 "out"]
 [map 3 "in" "n => n*10" "out"]
 [console "console 1" "in"]
 [console "console 2" "in"]
